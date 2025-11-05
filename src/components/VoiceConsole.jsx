@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Mic, MicOff, Volume2, Zap, Cpu } from 'lucide-react';
+import { Mic, MicOff, Volume2, Zap, Cpu, AlertCircle, ShieldCheck } from 'lucide-react';
 
 const getSpeechRecognition = () => {
   const SR = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -11,21 +11,34 @@ const synth = typeof window !== 'undefined' ? window.speechSynthesis : null;
 
 const VoiceConsole = () => {
   const [supported, setSupported] = useState(true);
+  const [secure, setSecure] = useState(true);
+  const [permission, setPermission] = useState('unknown'); // unknown | granted | denied
   const [listening, setListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [response, setResponse] = useState('');
   const [thinking, setThinking] = useState(false);
+  const [error, setError] = useState('');
   const recognitionRef = useRef(null);
 
   useEffect(() => {
+    // Check secure context - many browsers require HTTPS for mic
+    const isSecure = typeof window !== 'undefined' && (window.isSecureContext || window.location.protocol === 'https:');
+    setSecure(!!isSecure);
+
     const rec = getSpeechRecognition();
     if (!rec) {
       setSupported(false);
       return;
     }
+
     rec.continuous = true;
     rec.interimResults = true;
     rec.lang = 'en-US';
+
+    rec.onstart = () => {
+      setListening(true);
+      setError('');
+    };
 
     rec.onresult = (event) => {
       let final = '';
@@ -38,26 +51,81 @@ const VoiceConsole = () => {
       setTranscript(final.trim());
     };
 
+    rec.onerror = (e) => {
+      let msg = e.error || 'Unknown error';
+      if (msg === 'not-allowed' || msg === 'service-not-allowed') {
+        msg = 'Microphone permission was denied. Please allow mic access in your browser settings and reload.';
+        setPermission('denied');
+      } else if (msg === 'no-speech') {
+        msg = 'No speech detected. Try speaking closer to the mic.';
+      } else if (msg === 'audio-capture') {
+        msg = 'No microphone found. Plug in a mic or check device settings.';
+      }
+      setError(msg);
+      setListening(false);
+    };
+
     rec.onend = () => {
       setListening(false);
       if (transcript) handleGenerateResponse(transcript);
     };
 
     recognitionRef.current = rec;
-  }, []);
+  }, [transcript]);
 
-  const handleStart = () => {
-    if (!recognitionRef.current) return;
+  const requestMic = async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Immediately stop tracks; we just needed the permission prompt.
+      stream.getTracks().forEach(t => t.stop());
+      setPermission('granted');
+      return true;
+    } catch (e) {
+      setPermission('denied');
+      setError('Microphone permission is required. Please allow access and try again.');
+      return false;
+    }
+  };
+
+  const handleStart = async () => {
     setResponse('');
     setTranscript('');
-    setListening(true);
-    setThinking(false);
-    recognitionRef.current.start();
+    setError('');
+
+    if (!secure) {
+      setError('Microphone requires a secure context (HTTPS). Please open this site via HTTPS.');
+      return;
+    }
+
+    if (!recognitionRef.current) {
+      setSupported(false);
+      return;
+    }
+
+    if (permission !== 'granted') {
+      const ok = await requestMic();
+      if (!ok) return;
+    }
+
+    try {
+      recognitionRef.current.abort?.();
+    } catch (_) { /* noop */ }
+
+    try {
+      recognitionRef.current.start();
+    } catch (e) {
+      // Some engines throw if already started
+      try { recognitionRef.current.stop(); } catch (_) {}
+      setTimeout(() => {
+        try { recognitionRef.current.start(); } catch (_) {}
+      }, 200);
+    }
   };
 
   const handleStop = () => {
     if (!recognitionRef.current) return;
-    recognitionRef.current.stop();
+    try { recognitionRef.current.stop(); } catch (_) {}
   };
 
   const speak = (text) => {
@@ -66,26 +134,26 @@ const VoiceConsole = () => {
     utter.rate = 1.02;
     utter.pitch = 1.05;
     utter.volume = 1;
-    const voice = synth.getVoices().find(v => /en-US|en_GB/i.test(v.lang)) || synth.getVoices()[0];
+    const voices = synth.getVoices();
+    const voice = voices.find(v => /en-US|en_GB/i.test(v.lang)) || voices[0];
     if (voice) utter.voice = voice;
     synth.cancel();
     synth.speak(utter);
   };
 
   const handleGenerateResponse = (text) => {
-    // Simple on-device intent simulation for demo
     setThinking(true);
     const t = text.toLowerCase();
-    let reply = "I heard you.";
+    let reply = 'I heard you.';
 
     if (t.includes('time')) {
       reply = `The current time is ${new Date().toLocaleTimeString()}.`;
     } else if (t.includes('date') || t.includes('day')) {
       reply = `Today is ${new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}.`;
     } else if (t.includes('joke')) {
-      reply = 'Here\'s one: Why do programmers prefer dark mode? Because light attracts bugs.';
+      reply = "Here's one: Why do programmers prefer dark mode? Because light attracts bugs.";
     } else if (t.includes('weather')) {
-      reply = 'I cannot access live weather in this demo, but I can tell you it\'s a great day to build.';
+      reply = "I can't access live weather in this demo, but I can tell you it's a great day to build.";
     } else if (t.includes('hello') || t.includes('hey') || t.includes('hi')) {
       reply = 'Hello! How can I assist you today?';
     } else if (t.includes('who are you')) {
@@ -134,13 +202,34 @@ const VoiceConsole = () => {
                 </span>
               </div>
 
+              {!secure && (
+                <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-amber-200">
+                  <AlertCircle className="h-4 w-4" />
+                  Microphone requires HTTPS. Open this page over https:// and try again.
+                </div>
+              )}
+
+              {permission === 'denied' && (
+                <div className="mt-3 flex items-center gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 p-3 text-rose-200">
+                  <AlertCircle className="h-4 w-4" />
+                  Mic permission denied. Enable microphone access in your browser site settings.
+                </div>
+              )}
+
+              {error && (
+                <div className="mt-3 flex items-center gap-2 rounded-lg border border-rose-400/30 bg-rose-500/10 p-3 text-rose-200">
+                  <AlertCircle className="h-4 w-4" />
+                  {error}
+                </div>
+              )}
+
               <div className="mt-3 min-h-[140px] rounded-lg border border-white/10 bg-black/20 p-4 font-mono text-sm text-white/80">
                 {transcript || 'Tap the mic and start speaking...'}
               </div>
 
-              <div className="mt-4 flex items-center gap-3">
+              <div className="mt-4 flex flex-wrap items-center gap-3">
                 {!listening ? (
-                  <button onClick={handleStart} className="group inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-cyan-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-violet-600/20 transition hover:brightness-110">
+                  <button onClick={handleStart} className="group inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-cyan-600 px-4 py-2.5 text-sm font-medium text-white shadow-lg shadow-violet-600/20 transition hover:brightness-110 disabled:opacity-50" disabled={!secure}>
                     <Mic className="h-4 w-4" /> Start Listening
                   </button>
                 ) : (
@@ -151,6 +240,10 @@ const VoiceConsole = () => {
 
                 <button onClick={() => transcript && handleGenerateResponse(transcript)} className="inline-flex items-center gap-2 rounded-full bg-white/5 px-4 py-2.5 text-sm font-medium text-white ring-1 ring-white/10 transition hover:bg-white/10 disabled:opacity-40" disabled={!transcript || listening}>
                   <Zap className="h-4 w-4" /> Analyze
+                </button>
+
+                <button onClick={requestMic} className="inline-flex items-center gap-2 rounded-full bg-white/5 px-4 py-2.5 text-sm font-medium text-white ring-1 ring-white/10 transition hover:bg-white/10">
+                  <ShieldCheck className="h-4 w-4" /> Check mic access
                 </button>
               </div>
             </motion.div>
